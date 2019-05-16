@@ -106,7 +106,6 @@ def transformer_encode(encoder_function, inputs, target_space, hparams,
         losses=losses,
         attn_bias_for_padding=attn_bias_for_padding,
         **kwargs)
-
     return encoder_output, encoder_decoder_attention_bias
 
 
@@ -224,6 +223,7 @@ class Transformer(t2t_model.T2TModel):
         if noise and hparams.mode == tf.estimator.ModeKeys.TRAIN :
             res = common_layers.scaling_noised(res, save_noise_to = self.sym_noise)
         return res
+
 
     def body(self, features):
         """Transformer main model_fn.

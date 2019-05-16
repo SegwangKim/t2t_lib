@@ -191,7 +191,7 @@ def transformer_encoder(encoder_input,
               hparams.hidden_size,
               hparams.num_heads,
               hparams.attention_dropout,
-              attention_type=hparams.self_attention_type,
+              attention_type=hparams.get("enc_self_attention_type", hparams.self_attention_type),
               max_relative_position=hparams.max_relative_position,
               heads_share_relative_embedding=(
                   hparams.heads_share_relative_embedding),
