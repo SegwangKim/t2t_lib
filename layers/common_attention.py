@@ -1611,6 +1611,7 @@ def dot_product_attention(q,
   """
   with tf.variable_scope(
       name, default_name="dot_product_attention", values=[q, k, v]) as scope:
+    q = tf.identity(q, name='BUS')
     logits = tf.matmul(q, k, transpose_b=True)  # [..., length_q, length_kv]
     if bias is not None:
       bias = common_layers.cast_like(bias, logits)
@@ -1631,6 +1632,94 @@ def dot_product_attention(q,
       attention_image_summary(weights, image_shapes)
     return tf.matmul(weights, v)
 
+
+def dot_product_attention_cnn1(q,
+                              k,
+                              v,
+                              bias,
+                              dropout_rate=0.0,
+                              image_shapes=None,
+                              name=None,
+                              make_image_summary=True,
+                              save_weights_to=None,
+                              dropout_broadcast_dims=None,
+                              activation_dtype=None,
+                              weight_dtype=None,
+                              hard_attention_k=0):
+    with tf.variable_scope(
+            name, default_name="dot_product_attention_cnn", values=[q, k, v]) as scope:
+        logits = tf.matmul(q, k, transpose_b=True)  # [..., length_q, length_kv]
+        filter5 = tf.get_variable("cnn5", shape=[5, 5, 1, 1], dtype=tf.float32)
+        logits_t = tf.transpose(logits, [0, 2, 3, 1])
+        logits_cnn5_t = tf.nn.conv2d(logits_t, filter=filter5, strides=[1, 1, 1, 1], padding='SAME')
+        logits_cnns_t = logits_cnn5_t
+        logits = tf.transpose(logits_cnns_t, [0, 3, 1, 2])
+        if bias is not None:
+            bias = common_layers.cast_like(bias, logits)
+            logits += bias
+        # If logits are fp16, upcast before softmax
+        logits = maybe_upcast(logits, activation_dtype, weight_dtype)
+        weights = tf.nn.softmax(logits, name="attention_weights")
+        if hard_attention_k > 0:
+            weights = harden_attention_weights(weights, hard_attention_k)
+        weights = common_layers.cast_like(weights, q)
+        if save_weights_to is not None:
+            save_weights_to[scope.name] = weights
+            save_weights_to[scope.name + "/logits"] = logits
+        # Drop out attention links for each head.
+        weights = common_layers.dropout_with_broadcast_dims(
+            weights, 1.0 - dropout_rate, broadcast_dims=dropout_broadcast_dims)
+        if common_layers.should_generate_summaries() and make_image_summary:
+            attention_image_summary(weights, image_shapes)
+        return tf.matmul(weights, v)
+
+def dot_product_attention_prob_cnn(q,
+                                   k,
+                                   v,
+                                   bias,
+                                   dropout_rate=0.0,
+                                   image_shapes=None,
+                                   name=None,
+                                   make_image_summary=True,
+                                   save_weights_to=None,
+                                   dropout_broadcast_dims=None,
+                                   activation_dtype=None,
+                                   weight_dtype=None,
+                                   hard_attention_k=0):
+    with tf.variable_scope(
+            name, default_name="dot_product_attention_cnn", values=[q, k, v]) as scope:
+        logits = tf.matmul(q, k, transpose_b=True)  # [..., length_q, length_kv]
+        if bias is not None:
+            bias = common_layers.cast_like(bias, logits)
+            logits += bias
+        # If logits are fp16, upcast before softmax
+        logits = maybe_upcast(logits, activation_dtype, weight_dtype)
+        weights = tf.nn.softmax(logits, name="attention_weights")
+
+        logits_t = tf.transpose(weights, [0, 2, 3, 1])
+        filter3 = tf.get_variable("cnn3", shape=[3, 3, 4, 1], dtype=tf.float32)
+        filter5 = tf.get_variable("cnn5", shape=[5, 5, 4, 1], dtype=tf.float32)
+        filter7 = tf.get_variable("cnn7", shape=[7, 7, 4, 1], dtype=tf.float32)
+        filter9 = tf.get_variable("cnn9", shape=[9, 9, 4, 1], dtype=tf.float32)
+        logits_cnn3_t = tf.nn.conv2d(logits_t, filter=filter3, strides=[1, 1, 1, 1], padding='SAME')
+        logits_cnn5_t = tf.nn.conv2d(logits_t, filter=filter5, strides=[1, 1, 1, 1], padding='SAME')
+        logits_cnn7_t = tf.nn.conv2d(logits_t, filter=filter7, strides=[1, 1, 1, 1], padding='SAME')
+        logits_cnn9_t = tf.nn.conv2d(logits_t, filter=filter9, strides=[1, 1, 1, 1], padding='SAME')
+        logits_cnns_t = tf.concat([logits_cnn3_t, logits_cnn5_t, logits_cnn7_t, logits_cnn9_t], axis=-1)
+        weights = tf.transpose(logits_cnns_t, [0, 3, 1, 2])
+
+        if hard_attention_k > 0:
+            weights = harden_attention_weights(weights, hard_attention_k)
+        weights = common_layers.cast_like(weights, q)
+        if save_weights_to is not None:
+            save_weights_to[scope.name] = weights
+            save_weights_to[scope.name + "/logits"] = logits
+        # Drop out attention links for each head.
+        weights = common_layers.dropout_with_broadcast_dims(
+            weights, 1.0 - dropout_rate, broadcast_dims=dropout_broadcast_dims)
+        if common_layers.should_generate_summaries() and make_image_summary:
+            attention_image_summary(weights, image_shapes)
+        return tf.matmul(weights, v)
 
 def dot_product_attention_cnn(q,
                               k,
@@ -4310,6 +4399,22 @@ def multihead_attention(query_antecedent,
           dropout_broadcast_dims=dropout_broadcast_dims,
           activation_dtype=kwargs.get("activation_dtype"),
           hard_attention_k=hard_attention_k)
+    elif attention_type == "dot_product_cnn1":
+        x = dot_product_attention_cnn1(
+            q, k, v, bias, dropout_rate, image_shapes,
+            save_weights_to=save_weights_to,
+            make_image_summary=make_image_summary,
+            dropout_broadcast_dims=dropout_broadcast_dims,
+            activation_dtype=kwargs.get("activation_dtype"),
+            hard_attention_k=hard_attention_k)
+    elif attention_type == "dot_product_prob_cnn":
+        x = dot_product_attention_prob_cnn(
+            q, k, v, bias, dropout_rate, image_shapes,
+            save_weights_to=save_weights_to,
+            make_image_summary=make_image_summary,
+            dropout_broadcast_dims=dropout_broadcast_dims,
+            activation_dtype=kwargs.get("activation_dtype"),
+            hard_attention_k=hard_attention_k)
     elif attention_type == "dot_product_cnn":
         x = dot_product_attention_cnn(
             q, k, v, bias, dropout_rate, image_shapes,
