@@ -477,7 +477,7 @@ class T2TModel(base.Layer):
             modalities.get_targets_bottom(modality))
         # TODO(aidangomez): share variables?
         with tf.variable_scope(variable_scope_name) as vs:
-          self._add_variable_scope(variable_scope_name, vs)
+          # self._add_variable_scope(variable_scope_name, vs)
           log_info("Transforming feature '%s' with %s.targets_bottom",
                    feature_name,
                    modality_name)

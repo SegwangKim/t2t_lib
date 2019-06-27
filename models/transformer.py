@@ -289,6 +289,17 @@ class Transformer(t2t_model.T2TModel):
             **decode_kwargs
         )
 
+        additional_loss = hparams.get("logic_loss")
+        if additional_loss is not None:
+            predicted_difference = self.aux_decode(encoder_output, hparams)
+            expected_difference = features.get("logic")
+            if expected_difference is not None:
+                aux_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(predicted_difference, expected_difference)
+            else:
+                aux_loss = 0
+
+            return decoder_output, {"attention_loss": aux_loss}
+
         expected_attention_loss_type = hparams.get("expected_attention_loss_type")
         if expected_attention_loss_type is not None:
             expected_attentions = features.get("expected_attentions")
@@ -318,6 +329,7 @@ class Transformer(t2t_model.T2TModel):
             return ret, {"extra_loss": tf.add_n(losses)}
         else:
             return ret
+
 
     def _new_emb_fast_decode(self,
                              features,

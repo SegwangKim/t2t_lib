@@ -170,7 +170,6 @@ class ImageMsCocoCharacters(image_utils.Image2TextProblem):
       return mscoco_generator(data_dir, tmp_dir, True, 80000)
     else:
       return mscoco_generator(data_dir, tmp_dir, False, 40000)
-    raise NotImplementedError()
 
 
 @registry.register_problem
