@@ -598,10 +598,11 @@ class T2TModel(base.Layer):
     if isinstance(body_output, dict):
       logits = {}
       for k, v in six.iteritems(body_output):
+        logits[k] = self._top_single(v, k, features)
         # TODO(aidangomez): share variables here?
-        with tf.variable_scope(k) as top_vs:
-          self._add_variable_scope("top_%s" % k, top_vs)
-          logits[k] = self._top_single(v, k, features)
+        # with tf.variable_scope(k) as top_vs:
+        #   self._add_variable_scope("top_%s" % k, top_vs)
+        #   logits[k] = self._top_single(v, k, features)
       return logits
     else:
       return self._top_single(body_output, "targets", features)
