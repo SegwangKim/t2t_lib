@@ -28,6 +28,12 @@ from tensor2tensor.utils import t2t_model
 import tensorflow as tf
 
 
+def _dropout_gru_cell(hparams, train):
+    return tf.nn.rnn_cell.DropoutWrapper(
+        tf.nn.rnn_cell.GRUCell(hparams.hidden_size),
+        input_keep_prob=1.0 - hparams.dropout * tf.to_float(train))
+
+
 def _dropout_lstm_cell(hparams, train):
   return tf.nn.rnn_cell.DropoutWrapper(
       tf.nn.rnn_cell.LSTMCell(hparams.hidden_size),
@@ -64,6 +70,19 @@ def lstm(inputs, sequence_length, hparams, train, name, initial_state=None):
         initial_state=initial_state,
         dtype=tf.float32,
         time_major=False)
+
+
+def gru(inputs, sequence_length, hparams, train, name, initial_state=None):
+    layers = [_dropout_gru_cell(hparams, train)
+              for _ in range(hparams.num_hidden_layers)]
+    with tf.variable_scope(name):
+        return tf.nn.dynamic_rnn(
+            tf.nn.rnn_cell.MultiRNNCell(layers),
+            inputs,
+            sequence_length,
+            initial_state=initial_state,
+            dtype=tf.float32,
+            time_major=False)
 
 
 def lstm_attention_decoder(inputs, hparams, train, name, initial_state,
