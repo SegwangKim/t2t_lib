@@ -88,7 +88,8 @@ def padded_rmse(predictions, labels, weights_fn=common_layers.weights_all):
 def abs_error(predictions, labels, weights_fn=None):
   """Computes mean(abs(preds-target))."""
   del weights_fn  # Unused
-  targets = tf.squeeze(labels, axis=[2, 3])
+  # targets = tf.squeeze(labels, axis=[2, 3])
+  targets = labels
   batch_abs_error = tf.abs(predictions - targets)
   den = tf.ones(tf.shape(batch_abs_error), dtype=tf.float32)
   return (batch_abs_error, den)

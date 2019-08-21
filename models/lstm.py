@@ -27,12 +27,15 @@ from tensor2tensor.utils import t2t_model
 
 import tensorflow as tf
 
+def _dropout_vanilla_cell(hparams, train):
+    return tf.nn.rnn_cell.DropoutWrapper(
+        tf.nn.rnn_cell.BasicRNNCell(hparams.hidden_size, activation=lambda x: x),
+        input_keep_prob=1.0 - hparams.dropout * tf.to_float(train))
 
 def _dropout_gru_cell(hparams, train):
     return tf.nn.rnn_cell.DropoutWrapper(
         tf.nn.rnn_cell.GRUCell(hparams.hidden_size),
         input_keep_prob=1.0 - hparams.dropout * tf.to_float(train))
-
 
 def _dropout_lstm_cell(hparams, train):
   return tf.nn.rnn_cell.DropoutWrapper(
@@ -70,6 +73,19 @@ def lstm(inputs, sequence_length, hparams, train, name, initial_state=None):
         initial_state=initial_state,
         dtype=tf.float32,
         time_major=False)
+
+
+def vanilla(inputs, sequence_length, hparams, train, name, initial_state=None):
+    layers = [_dropout_vanilla_cell(hparams, train)
+              for _ in range(hparams.num_hidden_layers)]
+    with tf.variable_scope(name):
+        return tf.nn.dynamic_rnn(
+            tf.nn.rnn_cell.MultiRNNCell(layers),
+            inputs,
+            sequence_length,
+            initial_state=initial_state,
+            dtype=tf.float32,
+            time_major=False)
 
 
 def gru(inputs, sequence_length, hparams, train, name, initial_state=None):
@@ -155,6 +171,79 @@ def lstm_attention_decoder(inputs, hparams, train, name, initial_state,
 
     return output
 
+def gru_attention_decoder(inputs, hparams, train, name, initial_state,
+                           encoder_outputs, encoder_output_length,
+                           decoder_input_length):
+    layers = [_dropout_gru_cell(hparams, train)
+              for _ in range(hparams.num_hidden_layers)]
+    if hparams.attention_mechanism == "luong":
+        attention_mechanism_class = tf.contrib.seq2seq.LuongAttention
+    elif hparams.attention_mechanism == "bahdanau":
+        attention_mechanism_class = tf.contrib.seq2seq.BahdanauAttention
+    else:
+        raise ValueError("Unknown hparams.attention_mechanism = %s, must be "
+                         "luong or bahdanau." % hparams.attention_mechanism)
+    attention_mechanism = attention_mechanism_class(
+        hparams.hidden_size, encoder_outputs,
+        memory_sequence_length=encoder_output_length)
+
+    cell = tf.contrib.seq2seq.AttentionWrapper(
+        tf.nn.rnn_cell.MultiRNNCell(layers),
+        [attention_mechanism]*hparams.num_heads,
+        attention_layer_size=[hparams.attention_layer_size]*hparams.num_heads,
+        output_attention=(hparams.output_attention == 1))
+
+    batch_size = common_layers.shape_list(inputs)[0]
+
+    initial_state = cell.zero_state(batch_size, tf.float32).clone(
+        cell_state=initial_state)
+
+    with tf.variable_scope(name):
+        output, _ = tf.nn.dynamic_rnn(
+            cell,
+            inputs,
+            decoder_input_length,
+            initial_state=initial_state,
+            dtype=tf.float32,
+            time_major=False)
+        # output is [batch_size, decoder_steps, attention_size], where
+        # attention_size is either hparams.hidden_size (when
+        # hparams.output_attention is 0) or hparams.attention_layer_size (when
+        # hparams.output_attention is 1) times the number of attention heads.
+        #
+        # For multi-head attention project output back to hidden size.
+        if hparams.output_attention == 1 and hparams.num_heads > 1:
+            output = tf.layers.dense(output, hparams.hidden_size)
+
+        return output
+
+def gru_seq2seq_internal(inputs, targets, hparams, train):
+    """The basic LSTM seq2seq model, main step used for training."""
+    with tf.variable_scope("lstm_seq2seq"):
+        if inputs is not None:
+            inputs_length = common_layers.length_from_embedding(inputs)
+            # Flatten inputs.
+            inputs = common_layers.flatten4d3d(inputs)
+
+            # LSTM encoder.
+            inputs = tf.reverse_sequence(inputs, inputs_length, seq_axis=1)
+            _, final_encoder_state = gru(inputs, inputs_length, hparams, train,
+                                         "encoder")
+        else:
+            final_encoder_state = None
+
+        # LSTM decoder.
+        shifted_targets = common_layers.shift_right(targets)
+        # Add 1 to account for the padding added to the left from shift_right
+        targets_length = common_layers.length_from_embedding(shifted_targets) + 1
+        decoder_outputs, _ = gru(
+            common_layers.flatten4d3d(shifted_targets),
+            targets_length,
+            hparams,
+            train,
+            "decoder",
+            initial_state=final_encoder_state)
+        return tf.expand_dims(decoder_outputs, axis=2)
 
 def lstm_seq2seq_internal(inputs, targets, hparams, train):
   """The basic LSTM seq2seq model, main step used for training."""
@@ -206,6 +295,50 @@ def lstm_seq2seq_internal_attention(inputs, targets, hparams, train,
         final_encoder_state, encoder_outputs, inputs_length, targets_length)
     return tf.expand_dims(decoder_outputs, axis=2)
 
+def gru_bid_encoder(inputs, sequence_length, hparams, train, name):
+    with tf.variable_scope(name):
+        cell_fw = tf.nn.rnn_cell.MultiRNNCell(
+            [_dropout_gru_cell(hparams, train)
+             for _ in range(hparams.num_hidden_layers)])
+
+        cell_bw = tf.nn.rnn_cell.MultiRNNCell(
+            [_dropout_gru_cell(hparams, train)
+             for _ in range(hparams.num_hidden_layers)])
+
+        ((encoder_fw_outputs, encoder_bw_outputs),
+         (encoder_fw_state, encoder_bw_state)) = tf.nn.bidirectional_dynamic_rnn(
+            cell_fw,
+            cell_bw,
+            inputs,
+            sequence_length,
+            dtype=tf.float32,
+            time_major=False)
+
+        encoder_outputs = tf.concat((encoder_fw_outputs, encoder_bw_outputs), 2)
+        encoder_states = []
+
+        for i in range(hparams.num_hidden_layers):
+            if isinstance(encoder_fw_state[i], tf.nn.rnn_cell.LSTMStateTuple):
+                encoder_state_c = tf.concat(
+                    values=(encoder_fw_state[i].c, encoder_bw_state[i].c),
+                    axis=1,
+                    name="encoder_fw_state_c")
+                encoder_state_h = tf.concat(
+                    values=(encoder_fw_state[i].h, encoder_bw_state[i].h),
+                    axis=1,
+                    name="encoder_fw_state_h")
+                encoder_state = tf.nn.rnn_cell.LSTMStateTuple(
+                    c=encoder_state_c, h=encoder_state_h)
+            elif isinstance(encoder_fw_state[i], tf.Tensor):
+                encoder_state = tf.concat(
+                    values=(encoder_fw_state[i], encoder_bw_state[i]),
+                    axis=1,
+                    name="bidirectional_concat")
+
+            encoder_states.append(encoder_state)
+
+        encoder_states = tuple(encoder_states)
+        return encoder_outputs, encoder_states
 
 def lstm_bid_encoder(inputs, sequence_length, hparams, train, name):
   """Bidirectional LSTM for encoding inputs that are [batch x time x size]."""
@@ -253,6 +386,34 @@ def lstm_bid_encoder(inputs, sequence_length, hparams, train, name):
 
     encoder_states = tuple(encoder_states)
     return encoder_outputs, encoder_states
+
+def gru_seq2seq_internal_bid_encoder(inputs, targets, hparams, train):
+    """The basic LSTM seq2seq model with bidirectional encoder."""
+    with tf.variable_scope("lstm_seq2seq_bid_encoder"):
+        if inputs is not None:
+            inputs_length = common_layers.length_from_embedding(inputs)
+            # Flatten inputs.
+            inputs = common_layers.flatten4d3d(inputs)
+            # LSTM encoder.
+            _, final_encoder_state = gru_bid_encoder(
+                inputs, inputs_length, hparams, train, "encoder")
+        else:
+            inputs_length = None
+            final_encoder_state = None
+        # LSTM decoder.
+        shifted_targets = common_layers.shift_right(targets)
+        # Add 1 to account for the padding added to the left from shift_right
+        targets_length = common_layers.length_from_embedding(shifted_targets) + 1
+        hparams_decoder = copy.copy(hparams)
+        hparams_decoder.hidden_size = 2 * hparams.hidden_size
+        decoder_outputs, _ = gru(
+            common_layers.flatten4d3d(shifted_targets),
+            targets_length,
+            hparams_decoder,
+            train,
+            "decoder",
+            initial_state=final_encoder_state)
+        return tf.expand_dims(decoder_outputs, axis=2)
 
 
 def lstm_seq2seq_internal_bid_encoder(inputs, targets, hparams, train):
@@ -306,6 +467,27 @@ def lstm_seq2seq_internal_attention_bid_encoder(inputs, targets, hparams,
         inputs_length, targets_length)
     return tf.expand_dims(decoder_outputs, axis=2)
 
+def gru_seq2seq_internal_attention_bid_encoder(inputs, targets, hparams,
+                                                train):
+    """LSTM seq2seq model with attention, main step used for training."""
+    with tf.variable_scope("gru_seq2seq_attention_bid_encoder"):
+        inputs_length = common_layers.length_from_embedding(inputs)
+        # Flatten inputs.
+        inputs = common_layers.flatten4d3d(inputs)
+        # LSTM encoder.
+        encoder_outputs, final_encoder_state = gru_bid_encoder(
+            inputs, inputs_length, hparams, train, "encoder")
+        # LSTM decoder with attention
+        shifted_targets = common_layers.shift_right(targets)
+        # Add 1 to account for the padding added to the left from shift_right
+        targets_length = common_layers.length_from_embedding(shifted_targets) + 1
+        hparams_decoder = copy.copy(hparams)
+        hparams_decoder.hidden_size = 2 * hparams.hidden_size
+        decoder_outputs = gru_attention_decoder(
+            common_layers.flatten4d3d(shifted_targets), hparams_decoder, train,
+            "decoder", final_encoder_state, encoder_outputs,
+            inputs_length, targets_length)
+        return tf.expand_dims(decoder_outputs, axis=2)
 
 @registry.register_model
 class LSTMEncoder(t2t_model.T2TModel):
@@ -337,6 +519,17 @@ class LSTMSeq2seq(t2t_model.T2TModel):
     return lstm_seq2seq_internal(features.get("inputs"), features["targets"],
                                  self._hparams, train)
 
+
+@registry.register_model
+class GRUSeq2seq(t2t_model.T2TModel):
+
+    def body(self, features):
+        # TODO(lukaszkaiser): investigate this issue and repair.
+        if self._hparams.initializer == "orthogonal":
+            raise ValueError("GRU models fail with orthogonal initializer.")
+        train = self._hparams.mode == tf.estimator.ModeKeys.TRAIN
+        return gru_seq2seq_internal(features.get("inputs"), features["targets"],
+                                    self._hparams, train)
 
 @registry.register_model
 class LSTMSeq2seqAttention(t2t_model.T2TModel):
@@ -386,6 +579,17 @@ class LSTMSeq2seqAttentionBidirectionalEncoder(t2t_model.T2TModel):
     return lstm_seq2seq_internal_attention_bid_encoder(
         features.get("inputs"), features["targets"], self._hparams, train)
 
+
+@registry.register_model
+class GRUSeq2seqAttentionBidirectionalEncoder(t2t_model.T2TModel):
+
+    def body(self, features):
+        # TODO(lukaszkaiser): investigate this issue and repair.
+        if self._hparams.initializer == "orthogonal":
+            raise ValueError("LSTM models fail with orthogonal initializer.")
+        train = self._hparams.mode == tf.estimator.ModeKeys.TRAIN
+        return gru_seq2seq_internal_attention_bid_encoder(
+            features.get("inputs"), features["targets"], self._hparams, train)
 
 @registry.register_hparams
 def lstm_seq2seq():
