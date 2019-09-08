@@ -2214,6 +2214,14 @@ def transformer_parsing_ice():
     hparams.shared_embedding_and_softmax_weights = False
     return hparams
 
+@registry.register_hparams
+def transformer_super_tiny():
+    hparams = transformer_base()
+    hparams.num_hidden_layers = 2
+    hparams.hidden_size = 64
+    hparams.filter_size = 512
+    hparams.num_heads = 4
+    return hparams
 
 @registry.register_hparams
 def transformer_tiny():

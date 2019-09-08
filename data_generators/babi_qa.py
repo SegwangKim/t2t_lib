@@ -427,6 +427,9 @@ class BabiQa(text_problems.QuestionAndContext2TextProblem):
     num_classes = self._encoders["targets"].vocab_size
     p.modality = {"targets": modalities.ModalityType.CLASS_LABEL}
     p.vocab_size = {"targets": num_classes}
+    if self.has_inputs:
+        p.modality["inputs"] = modalities.ModalityType.SYMBOL
+        p.vocab_size["inputs"] = self._encoders["inputs"].vocab_size
 
   def example_reading_spec(self):
     data_fields, data_items_to_decoders = (
